@@ -210,21 +210,18 @@ impl Send {
         task: &mut Option<Waker>,
     ) {
         let is_reset = stream.state.is_reset();
-        let is_closed = stream.state.is_closed();
-        let is_empty = stream.pending_send.is_empty();
+        let is_closed = stream.is_closed();
         let stream_id = stream.id;
 
         tracing::trace!(
             "send_reset(..., reason={:?}, initiator={:?}, stream={:?}, ..., \
-             is_reset={:?}; is_closed={:?}; pending_send.is_empty={:?}; \
-             state={:?} \
+             is_reset={:?}; is_closed={:?}; state={:?} \
              ",
             reason,
             initiator,
             stream_id,
             is_reset,
             is_closed,
-            is_empty,
             stream.state
         );
 
@@ -240,39 +237,38 @@ impl Send {
         // Transition the state to reset no matter what.
         stream.set_reset(reason, initiator);
 
-        // If closed AND the send queue is flushed, then the stream cannot be
-        // reset explicitly, either. Implicit resets can still be queued.
-        if is_closed && is_empty {
+        if is_closed {
+            // Do not send an explicit RST_STREAM frame if the stream has been closed.
+            // HTTP/2 §5.1 allows only PRIORITY frames on closed streams.
             tracing::trace!(
-                " -> not sending explicit RST_STREAM ({:?} was closed \
-                 and send queue was flushed)",
+                " -> not sending explicit RST_STREAM ({:?} was closed)",
                 stream_id
             );
             return;
         }
 
-        // If the stream hasn't been opened yet (its initial HEADERS are still
-        // sitting in `pending_open`/`pending_send`), clearing the queue would
-        // drop those HEADERS and let a RST_STREAM become the first frame on an
-        // idle stream. HTTP/2 forbids that: §5.1 allows only HEADERS/PRIORITY
-        // on idle streams and §6.4 says RST_STREAM on idle is a PROTOCOL_ERROR.
-        // Keep the queued HEADERS so the stream opens, then send the reset
-        // immediately after.
-        if !stream.is_pending_open {
-            // Otherwise, drop any buffered DATA/HEADERS and only send the
-            // reset.
-            //
-            // Note that we don't call `self.recv_err` because we want to enqueue
-            // the reset frame before transitioning the stream inside
-            // `reclaim_all_capacity`.
-            self.prioritize.clear_queue(buffer, stream);
+        // Clear all pending outbound frames.
+        // Note that we don't call `self.recv_err` because we want to enqueue
+        // the reset frame before transitioning the stream inside
+        // `reclaim_all_capacity`.
+        self.prioritize.clear_queue(buffer, stream);
+
+        if stream.is_pending_open {
+            // Do not send an explicit RST_STREAM frame if the stream hasn't been opened.
+            // HTTP/2 §5.1 allows only HEADERS/PRIORITY on idle streams
+            // and §6.4 says RST_STREAM on idle is a PROTOCOL_ERROR.
+           tracing::trace!(
+                " -> not sending explicit RST_STREAM ({:?} was idle)",
+                stream_id
+            );
+        } else {
+            let frame = frame::Reset::new(stream.id, reason);
+
+            tracing::trace!("send_reset -- queueing; frame={:?}", frame);
+            self.prioritize
+                .queue_frame(frame.into(), buffer, stream, task);
         }
 
-        let frame = frame::Reset::new(stream.id, reason);
-
-        tracing::trace!("send_reset -- queueing; frame={:?}", frame);
-        self.prioritize
-            .queue_frame(frame.into(), buffer, stream, task);
         self.prioritize.reclaim_all_capacity(stream, counts);
     }
 
