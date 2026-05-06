@@ -29,6 +29,13 @@ stream = []
 # depends on this feature.
 unstable = []
 
+# Allows setting the maximum trace level at compile time for release builds.
+release_max_level_off = ["tracing/release_max_level_off"]
+release_max_level_error = ["tracing/release_max_level_error"]
+release_max_level_warn = ["tracing/release_max_level_warn"]
+release_max_level_info = ["tracing/release_max_level_info"]
+release_max_level_debug = ["tracing/release_max_level_debug"]
+
 [workspace]
 members = [
     "tests/h2-fuzz",
